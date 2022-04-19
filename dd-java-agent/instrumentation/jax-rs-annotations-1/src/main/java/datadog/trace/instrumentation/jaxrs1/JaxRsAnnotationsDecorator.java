@@ -13,15 +13,30 @@ import datadog.trace.bootstrap.instrumentation.api.UTF8BytesString;
 import datadog.trace.bootstrap.instrumentation.decorator.BaseDecorator;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.ws.rs.HttpMethod;
 import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
 
 public class JaxRsAnnotationsDecorator extends BaseDecorator {
   public static JaxRsAnnotationsDecorator DECORATE = new JaxRsAnnotationsDecorator();
 
-  private static final ClassValue<ConcurrentHashMap<Method, Pair<CharSequence, CharSequence>>>
+  private static class MethodDetails {
+    private final CharSequence method;
+    private final CharSequence route;
+    private final Map<String, Integer> pathParameters;
+
+    private MethodDetails(CharSequence method, CharSequence route, Map<String, Integer> pathParameters) {
+      this.method = method;
+      this.route = route;
+      this.pathParameters = pathParameters;
+    }
+  }
+
+  private static final ClassValue<ConcurrentHashMap<Method, MethodDetails>>
       RESOURCE_NAMES = GenericClassValue.constructing(ConcurrentHashMap.class);
 
   public static final CharSequence JAX_RS_CONTROLLER = UTF8BytesString.create("jax-rs-controller");
@@ -44,22 +59,21 @@ public class JaxRsAnnotationsDecorator extends BaseDecorator {
   public void onJaxRsSpan(
       final AgentSpan span, final AgentSpan parent, final Class<?> target, final Method method) {
 
-    final Pair<CharSequence, CharSequence> httpMethodAndRoute =
-        getHttpMethodAndRoute(target, method);
+    final MethodDetails methodDetails = getMethodDetails(target, method);
     span.setSpanType(InternalSpanTypes.HTTP_SERVER);
 
     // When jax-rs is the root, we want to name using the path, otherwise use the class/method.
     final boolean isRootScope = parent == null;
     if (isRootScope) {
       HTTP_RESOURCE_DECORATOR.withRoute(
-          span, httpMethodAndRoute.getLeft(), httpMethodAndRoute.getRight());
+          span, methodDetails.method, methodDetails.route);
     } else {
       // This check ensures that we only use the route from the first JAX-RS annotated method that
       // is executed
       if (parent.getLocalRootSpan().getResourceNamePriority()
           < ResourceNamePriorities.HTTP_FRAMEWORK_ROUTE) {
         HTTP_RESOURCE_DECORATOR.withRoute(
-            parent.getLocalRootSpan(), httpMethodAndRoute.getLeft(), httpMethodAndRoute.getRight());
+            parent.getLocalRootSpan(), methodDetails.method, methodDetails.route);
         parent.getLocalRootSpan().setTag(Tags.COMPONENT, "jax-rs");
       }
 
@@ -73,11 +87,10 @@ public class JaxRsAnnotationsDecorator extends BaseDecorator {
    *
    * @return The result can be an empty string but will never be {@code null}.
    */
-  private Pair<CharSequence, CharSequence> getHttpMethodAndRoute(
-      final Class<?> target, final Method method) {
-    Map<Method, Pair<CharSequence, CharSequence>> classMap = RESOURCE_NAMES.get(target);
-    Pair<CharSequence, CharSequence> httpMethodAndRoute = classMap.get(method);
-    if (httpMethodAndRoute == null) {
+  private MethodDetails getMethodDetails(final Class<?> target, final Method method) {
+    ConcurrentHashMap<Method, MethodDetails> classMap = RESOURCE_NAMES.get(target);
+    MethodDetails methodDetails = classMap.get(method);
+    if (methodDetails == null) {
       String httpMethod = null;
       Path methodPath = null;
       final Path classPath = findClassPath(target);
@@ -102,12 +115,33 @@ public class JaxRsAnnotationsDecorator extends BaseDecorator {
           }
         }
       }
-      httpMethodAndRoute =
+      methodDetails =
           Pair.<CharSequence, CharSequence>of(httpMethod, buildRoutePath(classPath, methodPath));
-      classMap.put(method, httpMethodAndRoute);
+      classMap.put(method, methodDetails);
     }
 
-    return httpMethodAndRoute;
+    return methodDetails;
+  }
+
+  private static Map<String, Integer> findPathParameters(Method method) {
+    Map<String, Integer> result = Collections.emptyMap();
+
+    Annotation[][] parameterAnnotations = method.getParameterAnnotations();
+    for (int i = 0; i < parameterAnnotations.length; i++) {
+      Annotation anns[] = parameterAnnotations[i];
+      for (Annotation a : anns) {
+        if (!PathParam.class.isAssignableFrom(a.getClass())) {
+          continue;
+        }
+        if (result.isEmpty()) {
+          result = new HashMap<>();
+        }
+
+        String name = ((PathParam)a).value();
+        result.put(name, )
+      }
+
+    }
   }
 
   private String locateHttpMethod(final Method method) {
